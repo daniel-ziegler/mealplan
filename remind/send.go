@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	. "github.com/daniel-ziegler/mealplan"
+	. "github.com/pikans/mealplan"
 )
 
 type ReminderGroup struct {

@@ -3,17 +3,18 @@ package main
 import "flag"
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/asn1"
 	"errors"
+	"golang.org/x/crypto/acme/autocert"
 	"io/ioutil"
 	"log"
 	"net/http"
-	"rsc.io/letsencrypt"
 	"strings"
 
-	"github.com/daniel-ziegler/mealplan/moira"
+	"github.com/pikans/mealplan/moira"
 )
 
 var deprecatedRSAIncEmailAddressForUseInSignatures = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 1}
@@ -40,15 +41,11 @@ func getMITCertEmailAddressFullName(chains [][]*x509.Certificate) (moira.Email, 
 }
 
 func run(handler http.Handler, unauthHandler http.Handler, register, listenhttp, listenhttps, authenticate, authorize, state string) {
-	var letsEncryptManager letsencrypt.Manager
-	if err := letsEncryptManager.CacheFile(state); err != nil {
-		log.Fatal(err)
-	}
-	if register != "" && !letsEncryptManager.Registered() {
-		letsEncryptManager.Register(register, func(terms string) bool {
-			log.Printf("Agreeing to %s ...", terms)
-			return true
-		})
+	letsEncryptManager := &autocert.Manager{
+		Cache:      autocert.DirCache(state),
+		Prompt:     autocert.AcceptTOS,
+		HostPolicy: func(ctx context.Context, host string) error { return nil },
+		Email:      register,
 	}
 
 	clientCAsPEM, err := ioutil.ReadFile(authenticate)
@@ -74,6 +71,7 @@ func run(handler http.Handler, unauthHandler http.Handler, register, listenhttp,
 		return nil
 	}
 
+	go func() { log.Fatal(http.ListenAndServe(listenhttp, letsEncryptManager.HTTPHandler(nil))) }()
 	srv := &http.Server{
 		Addr: listenhttps,
 		TLSConfig: &tls.Config{
@@ -91,7 +89,6 @@ func run(handler http.Handler, unauthHandler http.Handler, register, listenhttp,
 		}),
 	}
 
-	go func() { log.Fatal(http.ListenAndServe(listenhttp, http.HandlerFunc(letsencrypt.RedirectHTTP))) }()
 	log.Fatal(srv.ListenAndServeTLS("", ""))
 }
 

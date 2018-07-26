@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/daniel-ziegler/mealplan/moira"
+	"github.com/pikans/mealplan/moira"
 )
 
 // default
@@ -16,7 +16,7 @@ const DataFile = "signups.dat"
 const DateFormat = "Monday (1/2)"
 
 // The list of duties (currently hard-coded)
-var Duties = []string{"Big cook", "Little cook", "Tiny Cook", "Cleaner 1", "Cleaner 2", "Cleaner 3", "Fridge Ninja"}
+var Duties = []string{"Brunch cook", "Brunch cleaner", "Big cook", "Little cook", "Tiny Cook", "Cleaner 1", "Cleaner 2", "other"}
 
 // The data that is stored on disk. For "simplicity", the application just serializes and
 // deserializes the entire state into / out of a single file, rather than making use of a full-blown
@@ -24,7 +24,7 @@ var Duties = []string{"Big cook", "Little cook", "Tiny Cook", "Cleaner 1", "Clea
 type Data struct {
 	Days              []string
 	Assignments       map[string][]moira.Username
-	PlannedAttendance map[moira.Username][]bool
+	//removed: PlannedAttendance map[moira.Username][]bool
 	VersionID         string
 }
 
@@ -34,7 +34,7 @@ func GetDateRange() (startDate time.Time, endDate time.Time) {
 		panic(err)
 	}
 	startDate = time.Date(2017, 1, 2, 0, 0, 0, 0, EST)
-	endDate = time.Date(2017, 8, 31, 0, 0, 0, 0, EST)
+	endDate = time.Date(2018, 8, 27, 0, 0, 0, 0, EST)
 	return
 }
 
@@ -54,18 +54,16 @@ func makeDayNames() []string {
 	return days
 }
 
-// Make the empty state: no assignments, no planned attendance
+// Make the empty state: no assignments
 func emptyData() *Data {
 	assignments := make(map[string][]moira.Username)
 	days := makeDayNames()
 	for _, duty := range Duties {
 		assignments[duty] = make([]moira.Username, len(days))
 	}
-	plannedAttendance := map[moira.Username][]bool{}
 	return &Data{
 		days,
 		assignments,
-		plannedAttendance,
 		randomVersion(),
 	}
 }
@@ -96,12 +94,6 @@ func ReadData(dataFile string) (*Data, error) {
 				data.Assignments[duty] = append(data.Assignments[duty], "")
 			}
 		}
-		// Also extend planned attendance data
-		for person := range data.PlannedAttendance {
-			for len(data.PlannedAttendance[person]) < len(data.Days) {
-				data.PlannedAttendance[person] = append(data.PlannedAttendance[person], false)
-			}
-		}
 		return data, err
 	}
 }
@@ -129,19 +121,4 @@ func randomVersion() string {
 		panic(err)
 	}
 	return base64.StdEncoding.EncodeToString(b)
-}
-
-// Returns, for each day, how many people have indicated they want to come.
-func (data *Data) ComputeTotalAttendance() []int {
-	totals := []int{}
-	for dayindex := range data.Days {
-		total := 0
-		for _, attends := range data.PlannedAttendance {
-			if attends[dayindex] {
-				total += 1
-			}
-		}
-		totals = append(totals, total)
-	}
-	return totals
 }

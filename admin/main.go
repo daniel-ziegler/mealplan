@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	. "github.com/daniel-ziegler/mealplan"
+	. "github.com/pikans/mealplan"
 )
 
 var dataFile = "signups.dat"

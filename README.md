@@ -10,7 +10,7 @@ Running at <https://mealplan.pikans.org/>
 
 ## How to deploy
 
-Before you deploy, you'll need to clone pika's cdist repo: https://github.com/andres-erbsen/pika-yfncc-cdist.
+Before you deploy, you'll need to clone pika's cdist repo: <https://wiki.pikans.org/yfncc/git#yfncc-cdist>.
 
 You'll also need SSH keys for root on `pika-web.mit.edu` -- ask yfncc.
 

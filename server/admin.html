@@ -1,53 +1,51 @@
 <html>
-  <head>
-  <title>Sekrit Admin Interface</title>
-<style>
+	<head>
+		<title>Sekrit Admin Interface</title>
+		<style>
 table {
-  border-collapse: collapse;
+	border-collapse: collapse;
 }
 th {
-  padding: 4px 8px;
-  width: 12em;
+	padding: 4px 8px;
+	width: 12em;
 }
 td {
-  padding: 8;
-  border: 1px solid black;
-    text-align: center;
+	padding: 8;
+	border: 1px solid black;
+	text-align: center;
 }
-</style>
-  </head>
-  <body>
-  <h1>Sekrit Admin Interface</h1>
-  <form action="/adminSave" method="POST">
-    <table>
-      <tr>
-        <th></th>
-        {{range .DayNames}}
-        <th>{{.}}</th>
-        {{end}}
-      </tr>
-      {{$ass := .Assignments}}
-      {{range $duty := .Duties}}
-      <tr>
-        <th>{{$duty}}</th>
-        {{range $dayindex, $assignee := (index $ass $duty)}}
-        <td>
-          <input type="text" name="assignee/{{$duty}}/{{$dayindex}}" value="{{$assignee}}"/>
-        </td>
-        {{end}}
-      </tr>
-      {{end}}
-      <tr>
-        <td>planned attendance</td>
-        {{range $dayindex, $people := $.Attendance}}
-        <td>
-          {{$people}}
-        </td>
-        {{end}}
-      </tr>
-    </table>
-    <input type="hidden" name="oldversion" value="{{.VersionID}}"/>
-    <button name="save">Save!</button>
-  </form>
-  </body>
+		</style>
+	</head>
+	<body>
+		<h1>Sekrit Admin Interface</h1>
+		<form action="/adminSave" method="POST">
+			{{$ass := .Assignments}}
+			{{range $week, $days := .Weeks}}
+			<div class="week">
+				<table>
+					<tr>
+						<th></th>
+						{{range $days}}
+						<th>{{index $.DayNames .}}</th>
+						{{end}}
+					</tr>
+					{{range $duty := $.Duties}}
+					<tr>
+						<th>{{$duty}}</th>
+						{{range $dayindex := $days}}
+						{{$assignee := (index (index $ass $duty) $dayindex)}}
+						<td>
+							<input type="text" name="assignee/{{$duty}}/{{$dayindex}}" value="{{$assignee}}"/>
+						</td>
+						{{end}}
+					</tr>
+					{{end}}
+					</tr>
+				</table>
+			</div>
+			{{end}}
+			<input type="hidden" name="oldversion" value="{{.VersionID}}"/>
+			<button name="save">Save!</button>
+		</form>
+	</body>
 </html>

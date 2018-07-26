@@ -1,20 +1,30 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"html/template"
 	"log"
 	"net/http"
+	"net/smtp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/daniel-ziegler/mealplan/moira"
+	"github.com/pikans/mealplan/moira"
 
-	. "github.com/daniel-ziegler/mealplan"
+	. "github.com/pikans/mealplan"
 )
+
+func mealplanStartDate() time.Time {
+	EST, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		panic(err)
+	}
+	return time.Date(2018, 5, 22, 0, 0, 0, 0, EST) // TODO: date selector
+}
 
 // Use a mutex to prevent concurrent access to the data file.
 // It's a bit unfortunate to control access to a file system resource using an in-memory mutex in
@@ -23,16 +33,13 @@ var dataLock sync.Mutex
 
 // The data type which will be passed to the HTML template (signup.html).
 type DisplayData struct {
-	Duties                       []string
-	Authorized                   bool
-	Username                     moira.Username
-	DayNames                     []string
-	Weeks                        [][]int
-	CurrentUserPlannedAttendance []bool
-	TotalAttendance              []int
-	Attendance                   [][]moira.Username
-	Assignments                  map[string][]moira.Username
-	VersionID                    string
+	Duties      []string
+	Authorized  bool
+	Username    moira.Username
+	DayNames    []string
+	Weeks       [][]int
+	Assignments map[string][]moira.Username
+	VersionID   string
 }
 
 func makeWeeks(nrDays int) [][]int {
@@ -51,28 +58,13 @@ func makeWeeks(nrDays int) [][]int {
 	return remainingWeeks
 }
 
-func makeAttendance(bools map[moira.Username][]bool) [][]moira.Username {
-	att := [][]moira.Username{}
-	for person, planned := range bools {
-		for len(att) < len(planned) {
-			att = append(att, []moira.Username{})
-		}
-		for i, p := range planned {
-			if p {
-				att[i] = append(att[i], person)
-			}
-		}
-	}
-	return att
-}
-
 func handleErr(w http.ResponseWriter, err error) {
 	http.Error(w, err.Error(), http.StatusInternalServerError)
 	log.Printf("%s\n", err)
 }
 
 // This handler runs for unauthorized users (no certs / not on pika-food).
-// It displays all the claimed duties and the indicated attendance counts, but doesn't display
+// It displays all the claimed duties, but doesn't display
 // buttons or checkboxes for the users to make any changes. (This is taken care of in signup.html,
 // which checks .Authorized on the data to check whether the user is authorized or not.)
 func unauthHandler(w http.ResponseWriter, r *http.Request) {
@@ -89,15 +81,13 @@ func unauthHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d := DisplayData{
-		Duties:     Duties,
-		Authorized: false,
-		Username:   "",
-		DayNames:   currentData.Days,
-		Weeks:      makeWeeks(len(currentData.Days)),
-		CurrentUserPlannedAttendance: nil,
-		TotalAttendance:              currentData.ComputeTotalAttendance(),
-		Assignments:                  currentData.Assignments,
-		VersionID:                    currentData.VersionID,
+		Duties:      Duties,
+		Authorized:  false,
+		Username:    "",
+		DayNames:    currentData.Days,
+		Weeks:       makeWeeks(len(currentData.Days)),
+		Assignments: currentData.Assignments,
+		VersionID:   currentData.VersionID,
 	}
 	err = t.Execute(w, d)
 	if err != nil {
@@ -107,8 +97,7 @@ func unauthHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // This handler displays the main signup page for authorized users (certs & on pika-food).
-// It displays buttons and checkboxes to enable the user to claim duties and indicate the days they
-// plan on attending dinner.
+// It displays buttons and checkboxes to enable the user to claim duties.
 func signupHandler(w http.ResponseWriter, r *http.Request) {
 	t, err := template.ParseFiles("signup.html")
 	if err != nil {
@@ -128,10 +117,6 @@ func signupHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("displaying for user %v", username)
-	plan, ok := currentData.PlannedAttendance[username]
-	if !ok {
-		plan = make([]bool, len(currentData.Days))
-	}
 	for _, duty := range Duties {
 		// If duties contain slashes, the logic in claimHandler will break, because the button IDs use
 		// slashes as separators (see signup.html).
@@ -140,15 +125,13 @@ func signupHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	d := DisplayData{
-		Duties:     Duties,
-		Authorized: true,
-		Username:   username,
-		DayNames:   currentData.Days,
-		Weeks:      makeWeeks(len(currentData.Days)),
-		CurrentUserPlannedAttendance: plan,
-		TotalAttendance:              currentData.ComputeTotalAttendance(),
-		Assignments:                  currentData.Assignments,
-		VersionID:                    currentData.VersionID,
+		Duties:      Duties,
+		Authorized:  true,
+		Username:    username,
+		DayNames:    currentData.Days,
+		Weeks:       makeWeeks(len(currentData.Days)),
+		Assignments: currentData.Assignments,
+		VersionID:   currentData.VersionID,
 	}
 	err = t.Execute(w, d)
 	if err != nil {
@@ -162,83 +145,130 @@ func getAuthedUsername(r *http.Request) moira.Username {
 	return moira.UsernameFromEmail(email)
 }
 
+func transact(f func(*Data) error) error {
+	dataLock.Lock()
+	defer dataLock.Unlock()
+
+	currentData, err := ReadData(DataFile)
+	if err != nil {
+		return err
+	}
+
+	if err := f(currentData); err != nil {
+		return err
+	}
+
+	return WriteData(DataFile, currentData)
+}
+
 // This handler runs when users submit the form (by clicking Save or a duty-claiming button).
 // It updates the on-disk data correspondingly, and then sends users back to the main page.
 func claimHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method == "POST" {
-		r.ParseForm()
+	if r.Method != "POST" {
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+	r.ParseForm()
 
-		// Find whether a duty was claimed, and if so, which one
-		var dutyClaimed string
-		var dayIndexClaimed int
-		var claimingSomething bool
-		for key := range r.Form {
-			splitKey := strings.Split(key, "/")
-			if len(splitKey) == 3 && splitKey[0] == "claim" {
-				claimingSomething = true
-				dutyClaimed = splitKey[1]
-				var err error
-				dayIndexClaimed, err = strconv.Atoi(splitKey[2])
-				if err != nil {
-					handleErr(w, err)
-					return
+	username := getAuthedUsername(r)
+	if username == "" {
+		http.Error(w, "No username", http.StatusUnauthorized)
+	}
+
+	// Find whether a duty was claimed, and if so, which one
+	for key := range r.Form {
+		splitKey := strings.Split(key, "/")
+		if len(splitKey) == 3 && splitKey[0] == "claim" {
+			duty := splitKey[1]
+			dayIndex, err := strconv.Atoi(splitKey[2])
+			if err != nil {
+				handleErr(w, err)
+				return
+			}
+			dayname := ""
+			err = transact(func(currentData *Data) error {
+				ass, ok := currentData.Assignments[duty]
+				if !(ok && dayIndex < len(ass)) {
+					return errors.New("no such duty")
 				}
+				if ass[dayIndex] != "" {
+					return errors.New("somebody else got this one already.")
+				}
+				ass[dayIndex] = username
+				dayname = currentData.Days[dayIndex]
+				return nil
+			})
+			if err != nil {
 				break
 			}
+			log.Printf("%v claimed %v/%v", username, duty, dayname)
+			break
 		}
-
-		username := getAuthedUsername(r)
-		if username == "" {
-			http.Error(w, "No username", http.StatusUnauthorized)
-		}
-
-		dataLock.Lock()
-		defer dataLock.Unlock()
-		currentData, err := ReadData(DataFile)
-		if err != nil {
-			handleErr(w, err)
-			return
-		}
-
-		if claimingSomething {
-			// Claim the duty
-			if ass, ok := currentData.Assignments[dutyClaimed]; ok && dayIndexClaimed < len(ass) && ass[dayIndexClaimed] == "" {
-				log.Printf("%v claimed %v/%v", username, dutyClaimed, currentData.Days[dayIndexClaimed])
-				ass[dayIndexClaimed] = username
+		if len(splitKey) == 3 && splitKey[0] == "abandon" {
+			duty := splitKey[1]
+			dayIndex, err := strconv.Atoi(splitKey[2])
+			if err != nil {
+				handleErr(w, err)
+				return
 			}
-		}
-		// Also update planned attendance
-		plannedAttendance := make([]bool, len(currentData.Days))
-		for dayindex := range currentData.Days {
-			vals := r.Form[fmt.Sprintf("attend/%d", dayindex)]
-			willAttend := len(vals) == 1 && vals[0] == "true"
-			plannedAttendance[dayindex] = willAttend
-		}
-		currentData.PlannedAttendance[username] = plannedAttendance
+			dayname := ""
+			err = transact(func(currentData *Data) error {
+				ass, ok := currentData.Assignments[duty]
+				if !(ok && dayIndex < len(ass)) {
+					return errors.New("no such duty")
+				}
+				if ass[dayIndex] != username {
+					return errors.New("not yours, no need to abandon it.")
+				}
+				ass[dayIndex] = ""
+				dayname = currentData.Days[dayIndex]
+				return nil
+			})
+			if err != nil {
+				break
+			}
 
-		err = WriteData(DataFile, currentData)
-		if err != nil {
-			handleErr(w, err)
-			return
+			log.Printf("%v abandoned %v/%v", username, duty, dayname)
+
+			err = smtp.SendMail(
+				"outgoing.mit.edu:smtp",
+				nil,
+				"yfnkm@mit.edu",
+				[]string{"yfnkm@mit.edu", fmt.Sprint(username.Email())},
+				[]byte(fmt.Sprintf(`From: "pika kitchen website" <yfnkm@mit.edu>
+To: yfnkm@mit.edu
+Cc: %s
+Subject: %s unclaimed %v/%v -- eom
+
+`, username.Email(), username, duty, dayname)))
+			if err != nil {
+				log.Printf("%v", err)
+			}
+
+			break
 		}
 	}
+
 	// Display the main page again
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
-// Authorizes the user as admin (must be on yfnkm); aborts the request with 403 Forbidden if not.
-// Returns whether authorization succeeded.
+// Authorizes the user as admin (must be on yfnkm or yfncc); aborts the request
+// with 403 Forbidden if not.  Returns whether authorization succeeded.
 func adminAuth(w http.ResponseWriter, r *http.Request) bool {
 	username := getAuthedUsername(r)
 	if username == "" {
 		http.Error(w, "No username", http.StatusUnauthorized)
 		return false
 	}
-	if err := moira.IsAuthorized("yfnkm", username); err != nil {
-		http.Error(w, fmt.Sprintf("Not an admin: %v", username), http.StatusForbidden)
-		return false
+	if err := moira.IsAuthorized("yfnkm", username); err == nil {
+		return true
 	}
-	return true
+	if err := moira.IsAuthorized("yfncc", username); err == nil {
+		return true
+	}
+	http.Error(w, fmt.Sprintf("Not an admin (yfnkm or yfncc): %v", username), http.StatusForbidden)
+	return false
 }
 
 // This handler displays the secret admin interface, which displays a bunch of textboxes rather than
@@ -261,15 +291,13 @@ func adminHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d := DisplayData{
-		Duties:                       Duties,
-		Authorized:                   true,
-		Username:                     "",
-		DayNames:                     currentData.Days,
-		Weeks:                        makeWeeks(len(currentData.Days)),
-		Attendance:                   makeAttendance(currentData.PlannedAttendance),
-		CurrentUserPlannedAttendance: nil,
-		Assignments:                  currentData.Assignments,
-		VersionID:                    currentData.VersionID, // Store the version in a hidden field
+		Duties:      Duties,
+		Authorized:  true,
+		Username:    "",
+		DayNames:    currentData.Days,
+		Weeks:       makeWeeks(len(currentData.Days)),
+		Assignments: currentData.Assignments,
+		VersionID:   currentData.VersionID, // Store the version in a hidden field
 	}
 	err = t.Execute(w, d)
 	if err != nil {
@@ -302,7 +330,9 @@ func adminSaveHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, duty := range Duties {
 		for dayindex := range currentData.Assignments[duty] {
-			currentData.Assignments[duty][dayindex] = moira.Username(r.FormValue(fmt.Sprintf("assignee/%v/%v", duty, dayindex)))
+			if values, ok := r.Form[fmt.Sprintf("assignee/%v/%v", duty, dayindex)]; ok && len(values) != 0 {
+				currentData.Assignments[duty][dayindex] = moira.Username(values[0])
+			}
 		}
 	}
 	if err = WriteData(DataFile, currentData); err != nil {
@@ -370,16 +400,11 @@ func adminStatsHandler(w http.ResponseWriter, r *http.Request) {
 		stats[u] = PersonStats{Signups: []Signup{}, Username: u}
 	}
 
-	EST, err := time.LoadLocation("America/New_York")
-	if err != nil {
-		panic(err)
-	}
-	since := time.Date(2017, 5, 22, 0, 0, 0, 0, EST) // TODO: date selector
-
-	startDate, _ := GetDateRange()
+	mealplanStartDate := mealplanStartDate()
+	dbStartDate, _ := GetDateRange()
 	for dayindex, dayname := range currentData.Days {
-		date := startDate.AddDate(0, 0, dayindex)
-		if date.Equal(since) || date.After(since) {
+		date := dbStartDate.AddDate(0, 0, dayindex)
+		if date.Equal(mealplanStartDate) || date.After(mealplanStartDate) {
 			for _, duty := range Duties {
 				if dayindex < len(currentData.Assignments[duty]) {
 					u := currentData.Assignments[duty][dayindex]
@@ -391,8 +416,9 @@ func adminStatsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	d := StatsData{People: []PersonStats{}, Since: since}
+	d := StatsData{People: []PersonStats{}, Since: mealplanStartDate}
 	for _, s := range stats {
+		// if len(s.Signups) != 0 {
 		d.People = append(d.People, s)
 	}
 	sort.Sort(BySignupCount(d.People))
